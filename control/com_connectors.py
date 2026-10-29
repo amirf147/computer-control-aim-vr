@@ -106,7 +106,8 @@ class ExplorerCOMConnector:
         ps = f"""
         $shell = New-Object -ComObject Shell.Application
         $shell.Open('{abs_path.replace("'", "''")}')
-        Write-Output '{{"status":"opened","path":"{abs_path.replace('\\', '\\\\')}"}}'
+        escaped_abs_path = abs_path.replace('\\', '\\\\')
+        Write-Output '{{"status":"opened","path":"{escaped_abs_path}"}}'
         """
         res = self._run_ps_json(ps)
         if res and isinstance(res, dict):
