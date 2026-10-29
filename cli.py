@@ -157,6 +157,7 @@ def main():
     sb_parser.add_argument("--close", help="Close window in sandbox by title")
     sb_parser.add_argument("--destroy", action="store_true", help="Destroy sandbox desktop and kill processes")
     sb_parser.add_argument("--mode", choices=["interactive", "isolated_pip"], help="Switch desktop mode")
+    sb_parser.add_argument("--view", action="store_true", help="Launch live floating Picture-in-Picture window")
 
     # 15. explorer: File Explorer COM connector
     exp_parser = subparsers.add_parser("explorer", help="Direct File Explorer Shell COM interface")
@@ -391,8 +392,12 @@ def main():
             res, is_err = server.execute_tool("sandbox_manage", {"action": "destroy"})
             print(res[0]["text"])
             sys.exit(1 if is_err else 0)
+        elif args.view:
+            import pip_viewer
+            pip_viewer.main([])
+            sys.exit(0)
         else:
-            sys.stderr.write("Please specify --status, --launch, --capture, --close, --destroy, or --mode.\n")
+            sys.stderr.write("Please specify --status, --launch, --capture, --close, --destroy, --view, or --mode.\n")
             sys.exit(1)
 
     elif args.command == "explorer":

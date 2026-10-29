@@ -119,6 +119,18 @@ gdi32.GetDIBits.argtypes = [
 ]
 gdi32.GetDIBits.restype = ctypes.c_int
 
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.restype = ctypes.c_int
+
+user32.RealChildWindowFromPoint.argtypes = [wintypes.HWND, wintypes.POINT]
+user32.RealChildWindowFromPoint.restype = wintypes.HWND
+
 
 class STARTUPINFOW(ctypes.Structure):
     _fields_ = [
@@ -503,21 +515,304 @@ class VirtualDesktopManager:
             "windows": windows,
         }
 
-    def close_sandbox_window(self, target: str) -> bool:
-        """Sends WM_CLOSE to a window inside the sandbox desktop."""
-        target_lower = target.lower()
+    def capture_pip_canvas(
+        self,
+        canvas_width: int = 1920,
+        canvas_height: int = 1080,
+    ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
+        """
+        Creates and returns the direct PIL Image canvas and window list of all windows
+        open in the sandbox desktop without JPEG compression or base64 encoding.
+        """
         windows = self.list_sandbox_windows()
+        canvas = Image.new("RGB", (canvas_width, canvas_height), color=(30, 34, 42))
+        for win in windows:
+            try:
+                hwnd = win["hwnd"]
+                bx, by, bw, bh = win["bounds"]
+                w_img = self.capture_sandbox_window(hwnd)
+                if w_img and w_img.size[0] > 0 and w_img.size[1] > 0:
+                    paste_x = max(0, min(bx, canvas_width - 10))
+                    paste_y = max(0, min(by, canvas_height - 10))
+                    canvas.paste(w_img, (paste_x, paste_y))
+            except Exception as e:
+                sys.stderr.write(f"[VirtualDesktop] Window render error: {e}\n")
+        return canvas, windows
+
+    def find_sandbox_window(self, target: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Finds a top-level window inside the sandbox desktop matching target substring."""
+        windows = self.list_sandbox_windows()
+        if not windows:
+            return None
+        if not target:
+            return windows[0]
+        target_lower = target.lower().strip()
         for win in windows:
             if target_lower in win["title"].lower():
-                hwnd = win["hwnd"]
-                WM_CLOSE = 0x0010
-                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                return win
+        return windows[0] if windows else None
+
+    def _get_input_target_hwnd(self, hwnd: int) -> int:
+        """Finds the most suitable child control window (e.g. RichEdit, Edit) or falls back to hwnd."""
+        child_hwnds: List[int] = []
+
+        def enum_child_cb(h_child, lparam):
+            if user32.IsWindow(h_child) and user32.IsWindowVisible(h_child):
+                child_hwnds.append(h_child)
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        cb_func = WNDENUMPROC(enum_child_cb)
+        user32.EnumChildWindows.argtypes = [wintypes.HWND, WNDENUMPROC, wintypes.LPARAM]
+        user32.EnumChildWindows.restype = wintypes.BOOL
+        user32.EnumChildWindows(hwnd, cb_func, 0)
+
+        # Priority 1: RichEdit control (modern Notepad, WordPad, etc.)
+        for ch in child_hwnds:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ch, buf, 256)
+            cname = buf.value.lower()
+            if "richedit" in cname:
+                return ch
+
+        # Priority 2: Standard Win32 Edit or Scintilla
+        for ch in child_hwnds:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ch, buf, 256)
+            cname = buf.value.lower()
+            if cname == "edit" or "scintilla" in cname:
+                return ch
+
+        # Priority 3: TextBox or Document controls (excluding non-client/sink windows)
+        for ch in child_hwnds:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ch, buf, 256)
+            cname = buf.value.lower()
+            if ("textbox" in cname or "document" in cname) and not any(k in cname for k in ["nonclient", "sink"]):
+                return ch
+
+        # Priority 4: First non-sink child
+        for ch in child_hwnds:
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ch, buf, 256)
+            cname = buf.value.lower()
+            if not any(k in cname for k in ["nonclient", "sink", "bridge", "site"]):
+                return ch
+
+        return child_hwnds[0] if child_hwnds else hwnd
+
+    def click_sandbox_window(
+        self,
+        target: Optional[str] = None,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        button: str = "left",
+        clicks: int = 1,
+    ) -> bool:
+        """Dispatches mouse click message to target window in the sandbox desktop via PostMessageW."""
+        win = self.find_sandbox_window(target)
+        if not win:
+            return False
+        hwnd = win["hwnd"]
+        bx, by, bw, bh = win["bounds"]
+
+        if x is not None and y is not None:
+            if x >= bx and y >= by:
+                client_x = x - bx
+                client_y = y - by
+            else:
+                client_x = x
+                client_y = y
+        else:
+            client_x = max(10, bw // 2)
+            client_y = max(10, bh // 2)
+
+        lParam = (int(client_y) << 16) | (int(client_x) & 0xFFFF)
+        WM_LBUTTONDOWN = 0x0201
+        WM_LBUTTONUP = 0x0202
+        WM_RBUTTONDOWN = 0x0204
+        WM_RBUTTONUP = 0x0205
+        WM_MOUSEMOVE = 0x0200
+        MK_LBUTTON = 0x0001
+        MK_RBUTTON = 0x0002
+
+        msg_down = WM_RBUTTONDOWN if button == "right" else WM_LBUTTONDOWN
+        msg_up = WM_RBUTTONUP if button == "right" else WM_LBUTTONUP
+        mk_btn = MK_RBUTTON if button == "right" else MK_LBUTTON
+
+        target_hwnd = hwnd
+        pt = wintypes.POINT(int(client_x), int(client_y))
+        child = user32.RealChildWindowFromPoint(hwnd, pt)
+        if child and child != hwnd:
+            target_hwnd = child
+
+        for _ in range(clicks):
+            user32.PostMessageW(target_hwnd, WM_MOUSEMOVE, 0, lParam)
+            user32.PostMessageW(target_hwnd, msg_down, mk_btn, lParam)
+            time.sleep(0.02)
+            user32.PostMessageW(target_hwnd, msg_up, 0, lParam)
+            if clicks > 1:
+                time.sleep(0.05)
+        return True
+
+    def type_in_sandbox(self, target: Optional[str] = None, text: str = "", interval: float = 0.01) -> bool:
+        """Dispatches text characters directly to target window/control via WM_CHAR messages."""
+        win = self.find_sandbox_window(target)
+        if not win:
+            return False
+        target_hwnd = self._get_input_target_hwnd(win["hwnd"])
+
+        # Send a brief focus click to target control to activate caret
+        lParam = (20 << 16) | 20
+        WM_MOUSEMOVE = 0x0200
+        WM_LBUTTONDOWN = 0x0201
+        WM_LBUTTONUP = 0x0202
+        user32.PostMessageW(target_hwnd, WM_MOUSEMOVE, 0, lParam)
+        user32.PostMessageW(target_hwnd, WM_LBUTTONDOWN, 1, lParam)
+        time.sleep(0.02)
+        user32.PostMessageW(target_hwnd, WM_LBUTTONUP, 0, lParam)
+        time.sleep(0.04)
+
+        WM_CHAR = 0x0102
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        VK_RETURN = 0x0D
+
+        # Maintain a visible typing cadence so streaming is perceptible in PiP window (15-20 frames)
+        char_interval = max(0.04, interval)
+
+        for char in text:
+            if char in ("\n", "\r"):
+                user32.PostMessageW(target_hwnd, WM_KEYDOWN, VK_RETURN, 0)
+                user32.PostMessageW(target_hwnd, WM_KEYUP, VK_RETURN, 0)
+            else:
+                user32.PostMessageW(target_hwnd, WM_CHAR, ord(char), 0)
+            time.sleep(char_interval)
+        return True
+
+    def paste_in_sandbox(self, target: Optional[str] = None, text: str = "") -> bool:
+        """Copies text to clipboard and posts WM_PASTE to sandbox window."""
+        from control.clipboard import default_clipboard
+        default_clipboard.set_text(text)
+        win = self.find_sandbox_window(target)
+        if not win:
+            return False
+        target_hwnd = self._get_input_target_hwnd(win["hwnd"])
+
+        # Send focus click
+        lParam = (20 << 16) | 20
+        user32.PostMessageW(target_hwnd, 0x0200, 0, lParam)
+        user32.PostMessageW(target_hwnd, 0x0201, 1, lParam)
+        time.sleep(0.02)
+        user32.PostMessageW(target_hwnd, 0x0202, 0, lParam)
+        time.sleep(0.04)
+
+        WM_PASTE = 0x0302
+        user32.SendMessageW(target_hwnd, WM_PASTE, 0, 0)
+        return True
+
+    def press_key_in_sandbox(self, target: Optional[str] = None, key: str = "enter") -> bool:
+        """Dispatches virtual key message to target window in sandbox."""
+        win = self.find_sandbox_window(target)
+        if not win:
+            return False
+        target_hwnd = self._get_input_target_hwnd(win["hwnd"])
+
+        key_map = {
+            "enter": 0x0D,
+            "return": 0x0D,
+            "tab": 0x09,
+            "esc": 0x1B,
+            "escape": 0x1B,
+            "backspace": 0x08,
+            "space": 0x20,
+            "up": 0x26,
+            "down": 0x28,
+            "left": 0x25,
+            "right": 0x27,
+            "delete": 0x2E,
+        }
+        vk = key_map.get(key.lower(), 0x0D)
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        user32.PostMessageW(target_hwnd, WM_KEYDOWN, vk, 0)
+        time.sleep(0.02)
+        user32.PostMessageW(target_hwnd, WM_KEYUP, vk, 0)
+        return True
+
+    def hotkey_in_sandbox(self, target: Optional[str] = None, keys: Optional[List[str]] = None) -> bool:
+        """Dispatches common hotkeys to sandbox window via messages."""
+        if not keys:
+            return False
+        win = self.find_sandbox_window(target)
+        if not win:
+            return False
+        target_hwnd = self._get_input_target_hwnd(win["hwnd"])
+
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        WM_PASTE = 0x0302
+        WM_COPY = 0x0301
+        WM_CUT = 0x0300
+
+        lower_keys = [k.lower() for k in keys]
+        if "ctrl" in lower_keys or "control" in lower_keys:
+            other_keys = [k for k in lower_keys if k not in ("ctrl", "control")]
+            if other_keys:
+                letter = other_keys[0].upper()
+                if letter == "A":
+                    EM_SETSEL = 0x00B1
+                    user32.SendMessageW(target_hwnd, EM_SETSEL, 0, -1)
+                elif letter == "C":
+                    user32.SendMessageW(target_hwnd, WM_COPY, 0, 0)
+                elif letter == "V":
+                    user32.SendMessageW(target_hwnd, WM_PASTE, 0, 0)
+                elif letter == "X":
+                    user32.SendMessageW(target_hwnd, WM_CUT, 0, 0)
+                else:
+                    vk_ctrl = 0x11
+                    vk_letter = ord(letter) if len(letter) == 1 else 0x41
+                    user32.PostMessageW(target_hwnd, WM_KEYDOWN, vk_ctrl, 0)
+                    user32.PostMessageW(target_hwnd, WM_KEYDOWN, vk_letter, 0)
+                    time.sleep(0.02)
+                    user32.PostMessageW(target_hwnd, WM_KEYUP, vk_letter, 0)
+                    user32.PostMessageW(target_hwnd, WM_KEYUP, vk_ctrl, 0)
                 return True
         return False
 
+    def close_sandbox_window(self, target: str, force: bool = False) -> bool:
+        """Sends WM_CLOSE or force-kills matching windows inside the sandbox desktop."""
+        target_lower = target.lower().strip()
+        windows = self.list_sandbox_windows()
+        closed_count = 0
+        pids_to_kill = set()
+
+        for win in windows:
+            title_lower = win["title"].lower()
+            if target_lower in title_lower or target_lower in ("all", "*"):
+                hwnd = win["hwnd"]
+                pid = win.get("pid")
+                if force and pid:
+                    pids_to_kill.add(pid)
+                else:
+                    WM_CLOSE = 0x0010
+                    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                closed_count += 1
+
+        if force and pids_to_kill:
+            import subprocess
+            for pid in pids_to_kill:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+                except Exception:
+                    pass
+
+        return closed_count > 0
+
     def destroy_sandbox(self) -> Dict[str, Any]:
         """
-        Terminates tracked sandbox processes and cleans up desktop handles.
+        Terminates all tracked and active sandbox processes, clears zombie windows,
+        and cleans up desktop handles.
         """
         import subprocess
         # Collect any remaining processes owning windows inside the sandbox desktop
@@ -536,6 +831,12 @@ class VirtualDesktopManager:
             except Exception:
                 pass
         self._tracked_pids.clear()
+
+        # Terminate any lingering background notepad instances
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "notepad.exe"], capture_output=True)
+        except Exception:
+            pass
 
         if self._sandbox_handle:
             user32.CloseDesktop(self._sandbox_handle)

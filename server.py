@@ -1561,80 +1561,105 @@ class MCPServer:
                         s_x = step.get("x")
                         s_y = step.get("y")
                         btn = "right" if act == "right_click" else "left"
-                        if act == "triple_click":
-                            clicks = 3
-                        elif act == "double_click":
-                            clicks = 2
+                        clicks = 3 if act == "triple_click" else (2 if act == "double_click" else 1)
+
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.click_sandbox_window(
+                                target=s_target,
+                                x=s_x,
+                                y=s_y,
+                                button=btn,
+                                clicks=clicks,
+                            )
+                            step_record["details"] = f"Sandbox clicked {btn} (x{clicks}) target='{s_target}' (success={ok})"
                         else:
-                            clicks = 1
+                            if s_target:
+                                win = find_window(s_target)
+                                if win:
+                                    focus_window(win["hwnd"])
 
-                        if s_target:
-                            win = find_window(s_target)
-                            if win:
-                                focus_window(win["hwnd"])
+                            target_x, target_y = None, None
+                            target_bbox = None
 
-                        target_x, target_y = None, None
-                        target_bbox = None
+                            if s_mark is not None:
+                                mark = default_som.resolve_mark(s_mark)
+                                if not mark:
+                                    raise ValueError(f"Mark ID {s_mark} not found.")
+                                target_x, target_y = mark["center_x"], mark["center_y"]
+                                target_bbox = mark["bbox"]
+                            elif s_query:
+                                elem = default_locator.locate(query=s_query, target_window=s_target, role=s_role)
+                                if not elem:
+                                    raise ValueError(f"Element matching '{s_query}' not found via UIA or OCR on screen.")
+                                target_x, target_y = elem["center"][0], elem["center"][1]
+                                target_bbox = elem["bbox"]
+                                step_record["source"] = elem.get("source", "ocr")
+                            elif s_x is not None and s_y is not None:
+                                target_x, target_y, _ = self._project_coordinates(s_x, s_y, "pixel", target=s_target)
 
-                        if s_mark is not None:
-                            mark = default_som.resolve_mark(s_mark)
-                            if not mark:
-                                raise ValueError(f"Mark ID {s_mark} not found.")
-                            target_x, target_y = mark["center_x"], mark["center_y"]
-                            target_bbox = mark["bbox"]
-                        elif s_query:
-                            elem = default_locator.locate(query=s_query, target_window=s_target, role=s_role)
-                            if not elem:
-                                raise ValueError(f"Element matching '{s_query}' not found via UIA or OCR on screen.")
-                            target_x, target_y = elem["center"][0], elem["center"][1]
-                            target_bbox = elem["bbox"]
-                            step_record["source"] = elem.get("source", "ocr")
-                        elif s_x is not None and s_y is not None:
-                            target_x, target_y, _ = self._project_coordinates(s_x, s_y, "pixel", target=s_target)
+                            if target_x is None or target_y is None:
+                                raise ValueError(f"Step {idx}: missing query, mark_id, or x/y coordinates.")
 
-                        if target_x is None or target_y is None:
-                            raise ValueError(f"Step {idx}: missing query, mark_id, or x/y coordinates.")
+                            # Sample pre-state for verification if requested
+                            pre_state = default_servoing.sample_state(bbox=tuple(target_bbox) if target_bbox else None) if should_verify else None
 
-                        # Sample pre-state for verification if requested
-                        pre_state = default_servoing.sample_state(bbox=tuple(target_bbox) if target_bbox else None) if should_verify else None
+                            if act == "move":
+                                cx, cy = default_mouse.move(target_x, target_y)
+                                step_record["details"] = f"Moved to ({cx}, {cy})"
+                            elif act == "hover":
+                                dur = float(step.get("duration", 0.25))
+                                cx, cy = default_mouse.hover(target_x, target_y, duration=dur)
+                                step_record["details"] = f"Hovered at ({cx}, {cy}) for {dur}s"
+                            else:
+                                cx, cy = default_mouse.click(x=target_x, y=target_y, button=btn, clicks=clicks)
+                                step_record["details"] = f"Clicked {btn} (x{clicks}) at ({cx}, {cy})"
 
-                        if act == "move":
-                            cx, cy = default_mouse.move(target_x, target_y)
-                            step_record["details"] = f"Moved to ({cx}, {cy})"
-                        elif act == "hover":
-                            dur = float(step.get("duration", 0.25))
-                            cx, cy = default_mouse.hover(target_x, target_y, duration=dur)
-                            step_record["details"] = f"Hovered at ({cx}, {cy}) for {dur}s"
-                        else:
-                            cx, cy = default_mouse.click(x=target_x, y=target_y, button=btn, clicks=clicks)
-                            step_record["details"] = f"Clicked {btn} (x{clicks}) at ({cx}, {cy})"
-
-                        if should_verify and pre_state and act not in ["move", "hover"]:
-                            reaction = default_servoing.verify_reaction(pre_state, bbox=tuple(target_bbox) if target_bbox else None)
-                            step_record["reaction"] = reaction["details"]
-                            step_record["verified"] = reaction["verified"]
+                            if should_verify and pre_state and act not in ["move", "hover"]:
+                                reaction = default_servoing.verify_reaction(pre_state, bbox=tuple(target_bbox) if target_bbox else None)
+                                step_record["reaction"] = reaction["details"]
+                                step_record["verified"] = reaction["verified"]
 
                     elif act == "type_text":
                         text_to_type = step.get("text", "")
                         interval = float(step.get("interval", 0.01))
-                        default_keyboard.type_text(text_to_type, interval=interval)
-                        step_record["details"] = f"Typed '{text_to_type[:20]}...'" if len(text_to_type) > 20 else f"Typed '{text_to_type}'"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.type_in_sandbox(
+                                target=step.get("target"),
+                                text=text_to_type,
+                                interval=interval,
+                            )
+                            step_record["details"] = f"Sandbox typed {len(text_to_type)} chars (success={ok})"
+                        else:
+                            default_keyboard.type_text(text_to_type, interval=interval)
+                            step_record["details"] = f"Typed '{text_to_type[:20]}...'" if len(text_to_type) > 20 else f"Typed '{text_to_type}'"
 
                     elif act == "paste_text":
                         text_to_paste = step.get("text", "")
-                        rst = bool(step.get("restore", False))
-                        ok = default_clipboard.paste(text_to_paste, restore_clipboard=rst)
-                        step_record["details"] = f"Pasted {len(text_to_paste)} characters (success={ok})"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.paste_in_sandbox(target=step.get("target"), text=text_to_paste)
+                            step_record["details"] = f"Sandbox pasted {len(text_to_paste)} characters (success={ok})"
+                        else:
+                            rst = bool(step.get("restore", False))
+                            ok = default_clipboard.paste(text_to_paste, restore_clipboard=rst)
+                            step_record["details"] = f"Pasted {len(text_to_paste)} characters (success={ok})"
 
                     elif act == "press_key":
                         k = step.get("key", "enter")
-                        default_keyboard.press_key(k)
-                        step_record["details"] = f"Pressed '{k}'"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.press_key_in_sandbox(target=step.get("target"), key=k)
+                            step_record["details"] = f"Sandbox pressed '{k}' (success={ok})"
+                        else:
+                            default_keyboard.press_key(k)
+                            step_record["details"] = f"Pressed '{k}'"
 
                     elif act == "hotkey":
                         keys = step.get("keys", [])
-                        default_keyboard.hotkey(*keys)
-                        step_record["details"] = f"Hotkey {keys}"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.hotkey_in_sandbox(target=step.get("target"), keys=keys)
+                            step_record["details"] = f"Sandbox hotkey {keys} (success={ok})"
+                        else:
+                            default_keyboard.hotkey(*keys)
+                            step_record["details"] = f"Hotkey {keys}"
 
                     elif act == "wait":
                         sec = float(step.get("seconds", 0.5))
@@ -1650,29 +1675,44 @@ class MCPServer:
 
                     elif act == "focus_window":
                         w_target = step.get("target")
-                        win = find_window(w_target)
-                        if not win:
-                            raise ValueError(f"Window matching '{w_target}' not found.")
-                        focus_window(win["hwnd"])
-                        step_record["details"] = f"Focused '{win['title']}'"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            win = default_virtual_desktop.find_sandbox_window(w_target)
+                            step_record["details"] = f"Targeted sandbox window '{win.get('title') if win else w_target}'"
+                        else:
+                            win = find_window(w_target)
+                            if not win:
+                                raise ValueError(f"Window matching '{w_target}' not found.")
+                            focus_window(win["hwnd"])
+                            step_record["details"] = f"Focused '{win['title']}'"
 
                     elif act == "close_window":
                         w_target = step.get("target") or step.get("query")
                         if not w_target:
                             raise ValueError(f"Step {idx}: 'close_window' requires 'target'.")
                         force = bool(step.get("force", False))
-                        ok = close_window_safely(w_target, force=force)
-                        step_record["details"] = f"Closed window matching '{w_target}' (success={ok})"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            ok = default_virtual_desktop.close_sandbox_window(w_target, force=force)
+                            step_record["details"] = f"Closed window matching '{w_target}' in sandbox (success={ok})"
+                        else:
+                            ok = close_window_safely(w_target, force=force)
+                            step_record["details"] = f"Closed window matching '{w_target}' (success={ok})"
 
                     elif act == "launch_app":
                         app_name = step.get("name") or step.get("query")
                         if not app_name:
                             raise ValueError(f"Step {idx}: 'launch_app' requires 'name'.")
                         app_args = step.get("args")
-                        res = launch_application(app_name, app_args)
-                        if res.get("status") == "error":
-                            raise RuntimeError(res.get("message", "App launch failed."))
-                        step_record["details"] = f"Launched '{app_name}' (status={res.get('status')})"
+                        if default_virtual_desktop.get_mode() == "isolated_pip":
+                            cmd_str = f"{app_name} {app_args}".strip() if app_args else app_name
+                            res = default_virtual_desktop.launch_in_sandbox(cmd_str)
+                            if res.get("status") == "error":
+                                raise RuntimeError(res.get("message", "App sandbox launch failed."))
+                            step_record["details"] = f"Launched '{app_name}' in sandbox (pid={res.get('pid')})"
+                        else:
+                            res = launch_application(app_name, app_args)
+                            if res.get("status") == "error":
+                                raise RuntimeError(res.get("message", "App launch failed."))
+                            step_record["details"] = f"Launched '{app_name}' (status={res.get('status')})"
 
                     elif act == "manage_window":
                         w_target = step.get("target")
