@@ -164,7 +164,12 @@
         <div class="card">
           <div class="card-header">
             <span class="card-title">PiP Sandbox Canvas</span>
-            <button class="btn btn-sm" onclick="refreshPreview()">📸 Capture Live</button>
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; color: var(--text-secondary);">
+                <input type="checkbox" id="auto-stream-toggle" checked onchange="toggleAutoStream(this.checked)"> Auto-Refresh
+              </label>
+              <button class="btn btn-sm" onclick="refreshPreview()">📸 Capture Live</button>
+            </div>
           </div>
           <div class="preview-container">
             <img id="preview-image" src="" alt="Screen Preview" class="preview-img">
