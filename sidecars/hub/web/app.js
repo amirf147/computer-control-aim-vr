@@ -252,7 +252,7 @@ function refreshPreview() {
     img.style.display = 'none';
     if (placeholder) placeholder.style.display = 'flex';
   };
-  img.src = `/api/preview?mode=auto&t=${Date.now()}`;
+  img.src = `/api/preview?mode=sandbox&t=${Date.now()}`;
 }
 
 // Launch App in Sandbox
@@ -271,7 +271,7 @@ async function launchInSandbox() {
     setTimeout(() => {
       fetchStatus();
       refreshPreview();
-    }, 500);
+    }, 1200);
   } catch (err) {
     console.error('Failed to launch in sandbox:', err);
   }
