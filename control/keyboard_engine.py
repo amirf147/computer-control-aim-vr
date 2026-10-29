@@ -204,13 +204,15 @@ class KeyboardEngine:
         self.governor.post_action()
 
     def _release_all_modifiers(self):
-        """Universal failsafe: ensure all standard modifiers are physically released."""
+        """Universal failsafe: ensure all standard modifiers are physically released without phantom Alt keyups."""
         EXTENDED_MODS = {0x5B, 0x5C, 0xA3, 0xA5}
         for mod_vk in (0x11, 0xA2, 0xA3, 0x12, 0xA4, 0xA5, 0x10, 0xA0, 0xA1, 0x5B, 0x5C):
-            flags = KEYEVENTF_KEYUP
-            if mod_vk in EXTENDED_MODS:
-                flags |= KEYEVENTF_EXTENDEDKEY
-            user32.keybd_event(mod_vk, 0, flags, 0)
+            # Only send key-up if key is actively pressed down to prevent spurious Alt/menu activations
+            if user32.GetAsyncKeyState(mod_vk) & 0x8000:
+                flags = KEYEVENTF_KEYUP
+                if mod_vk in EXTENDED_MODS:
+                    flags |= KEYEVENTF_EXTENDEDKEY
+                user32.keybd_event(mod_vk, 0, flags, 0)
 
     def hotkey(self, *keys: str, duration: float = 0.04):
         """

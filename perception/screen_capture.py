@@ -9,6 +9,7 @@ from ctypes import wintypes
 import io
 import base64
 import sys
+import contextlib
 from typing import Optional, Tuple, Dict, Any, List
 from PIL import Image, ImageChops
 
@@ -273,12 +274,41 @@ def list_visible_windows() -> List[Dict[str, Any]]:
     return windows
 
 
+VK_MENU = 0x12  # Alt key
+VK_NONE = 0xFF  # Unassigned dummy key to cancel menu focus activation
+
+
+@contextlib.contextmanager
+def _alt_key_bypass():
+    """
+    Simulates a synthetic unassigned virtual keypress (VK_NONE = 0xFF) to reset
+    ForegroundLockTimeout without ever touching VK_MENU (Alt).
+    """
+    user32.keybd_event(VK_NONE, 0, 0, 0)  # VK_NONE down
+    try:
+        yield
+    finally:
+        user32.keybd_event(VK_NONE, 0, 2, 0)  # VK_NONE up
+
+
 def find_window(target: str) -> Optional[Dict[str, Any]]:
-    """Finds first matching visible window by title substring (case-insensitive)."""
-    target_lower = target.lower()
-    for win in list_visible_windows():
+    """Finds first matching visible window by title substring (case-insensitive) with resilient app fallback."""
+    target_lower = target.lower().strip()
+    all_wins = list_visible_windows()
+
+    # 1. Exact substring match
+    for win in all_wins:
         if target_lower in win["title"].lower():
             return win
+
+    # 2. Resilient fallback: handle dynamic titles (e.g. 'Untitled - Notepad' -> '*from AIM-VR - Notepad')
+    if " - " in target_lower:
+        app_suffix = target_lower.rsplit(" - ", 1)[-1].strip()
+        if app_suffix:
+            for win in all_wins:
+                if app_suffix in win["title"].lower():
+                    return win
+
     return None
 
 
@@ -288,31 +318,37 @@ def focus_window(hwnd: int) -> bool:
     if not hwnd or not user32.IsWindow(hwnd):
         return False
 
+    # Fast path if already active foreground window
+    if user32.GetForegroundWindow() == hwnd:
+        return True
+
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if pid.value == 0:
         return False
 
     try:
+        # 0. AllowSetForegroundWindow best effort
+        try:
+            user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
         user32.BringWindowToTop(hwnd)
 
-        # Shell taskbar activation bypass: restores minimized window and activates even from background processes
-        if hasattr(user32, "SwitchToThisWindow"):
-            try:
-                user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
-                user32.SwitchToThisWindow.restype = None
-                user32.SwitchToThisWindow(hwnd, True)
-            except Exception:
-                pass
-
-        # Win32 Alt-key foreground unlock bypass to bypass Windows ForegroundLockTimeout
-        user32.keybd_event(0x12, 0, 0, 0)  # VK_MENU down
+        # TIER 1: Direct SetForegroundWindow (Fast Path)
         res = user32.SetForegroundWindow(hwnd)
-        user32.keybd_event(0x12, 0, 2, 0)  # VK_MENU up
-        if not res:
-            # Safe bypass: attach thread input queues temporarily without touching keyboard state
+
+        # TIER 2: Alt-Key Bypass with VK_NONE cancel to prevent menu bar focus activation
+        if not res or user32.GetForegroundWindow() != hwnd:
+            with _alt_key_bypass():
+                user32.BringWindowToTop(hwnd)
+                res = user32.SetForegroundWindow(hwnd)
+
+        # TIER 3: Thread Input Attachment + Alt-Key Bypass if still not foreground
+        if not res or user32.GetForegroundWindow() != hwnd:
             cur_tid = kernel32.GetCurrentThreadId()
             fg_hwnd = user32.GetForegroundWindow()
             fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
@@ -326,7 +362,17 @@ def focus_window(hwnd: int) -> bool:
                 if target_tid and target_tid != cur_tid:
                     attached_target = bool(user32.AttachThreadInput(cur_tid, target_tid, True))
 
-                user32.SetForegroundWindow(hwnd)
+                with _alt_key_bypass():
+                    user32.BringWindowToTop(hwnd)
+                    user32.SetForegroundWindow(hwnd)
+
+                if hasattr(user32, "SwitchToThisWindow"):
+                    try:
+                        user32.SwitchToThisWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+                        user32.SwitchToThisWindow.restype = None
+                        user32.SwitchToThisWindow(hwnd, True)
+                    except Exception:
+                        pass
             finally:
                 if attached_fg:
                     user32.AttachThreadInput(cur_tid, fg_tid, False)

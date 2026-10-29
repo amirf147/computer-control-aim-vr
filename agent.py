@@ -100,7 +100,7 @@ Your objective is to translate user natural language requests into a sequence of
 
 ### Operational Rules:
 1. Application Lifecycle: Always insert a wait step (seconds=1.0 to 1.5) immediately after launch_app so the GUI window has time to spawn and paint.
-2. Element Targeting: When interacting with an application, set target to the application's window title substring (e.g. 'Calculator', 'Notepad', 'Chrome') and query to the exact button label or text (e.g. query='7', query='File', query='Save').
+2. Element Targeting: When interacting with an application, set target to the application's window title substring (e.g. 'Calculator', 'Notepad', 'Chrome') and query to the exact button label or text (e.g. query='7', query='File', query='Save'). Always use concise, stable application names for 'target' (e.g. 'Notepad' instead of 'Untitled - Notepad') to avoid failures when dynamic titles change during editing.
 3. Extracting Results: If the user instruction requires reading a calculation, status, or text from an application, send hotkey keys=['ctrl', 'c'] while the application is focused to copy the result to the Windows clipboard before closing the window.
 4. Window Cleanup: If the user task specifies closing the application after completing the action, include close_window at the end. Otherwise leave it open.
 5. Strict JSON Output: Output ONLY a valid JSON object matching this schema without markdown code blocks or conversational commentary:
@@ -178,9 +178,10 @@ class OllamaPlanner:
 class ExecutionHarness:
     """Executes validated multi-step plans via MCPServer and captures results."""
 
-    def __init__(self, verify: bool = True, sandbox: bool = False):
+    def __init__(self, verify: bool = True, sandbox: bool = False, record_path: Optional[str] = None):
         self.verify = verify
         self.sandbox = sandbox
+        self.record_path = record_path
         desktop_mode = "isolated_pip" if sandbox else "interactive"
         default_governor.configure(failsafe=False, desktop_mode=desktop_mode)
         self.server = MCPServer()
@@ -197,10 +198,32 @@ class ExecutionHarness:
         # Clear clipboard prior to run so newly copied values are cleanly detected
         default_clipboard.set_text("")
 
-        content, is_error = self.server.execute_tool("execute_autonomous_task", {
-            "steps": steps,
-            "verify": self.verify
-        })
+        if self.record_path:
+            self.server.execute_tool("record_screen", {
+                "action": "start",
+                "fps": 15,
+                "max_dim": 800,
+                "include_cursor": True
+            })
+
+        try:
+            content, is_error = self.server.execute_tool("execute_autonomous_task", {
+                "steps": steps,
+                "verify": self.verify
+            })
+        finally:
+            if self.record_path:
+                rec_res, _ = self.server.execute_tool("record_screen", {
+                    "action": "stop",
+                    "output_path": self.record_path,
+                    "format": "webp"
+                })
+                if rec_res and len(rec_res) > 0:
+                    try:
+                        info = json.loads(rec_res[0].get("text", "{}"))
+                        print(f"[Recording Saved]: {info.get('path', self.record_path)} ({info.get('frames', 0)} frames, {info.get('duration_s', 0)}s)")
+                    except Exception:
+                        print(f"[Recording Saved]: {self.record_path}")
 
         summary = {}
         if content and len(content) > 0:
@@ -224,12 +247,13 @@ class AgentHarness:
         ollama_url: str = "http://127.0.0.1:11434/api/generate",
         verify: bool = True,
         sandbox: bool = False,
+        record_path: Optional[str] = None,
     ):
         self.sandbox = sandbox
         self.registry = ToolRegistry()
         self.prompt_builder = PromptBuilder(self.registry, sandbox=sandbox)
         self.planner = OllamaPlanner(model=model, url=ollama_url)
-        self.harness = ExecutionHarness(verify=verify, sandbox=sandbox)
+        self.harness = ExecutionHarness(verify=verify, sandbox=sandbox, record_path=record_path)
 
     def run_task(self, task: str, plan_only: bool = False, verbose: bool = False) -> bool:
         mode_label = "Isolated PiP Sandbox (WinSta0\\AIMVR_Sandbox)" if self.sandbox else "Interactive Desktop"
@@ -348,6 +372,11 @@ def parse_cli_args():
         help="Launch an Always-On-Top floating Picture-in-Picture window previewing sandbox desktop activity."
     )
     parser.add_argument(
+        "--record", "-r",
+        default=None,
+        help="Path to save continuous animated WebP screen recording (e.g. assets/demo.webp)."
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Display verbose prompts and metadata."
@@ -368,6 +397,7 @@ def main():
         ollama_url=args.ollama_url,
         verify=not args.no_verify,
         sandbox=args.sandbox or args.pip_window,
+        record_path=args.record,
     )
 
     try:

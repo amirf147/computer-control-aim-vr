@@ -1630,6 +1630,11 @@ class MCPServer:
                             )
                             step_record["details"] = f"Sandbox typed {len(text_to_type)} chars (success={ok})"
                         else:
+                            s_target = step.get("target")
+                            if s_target:
+                                win = find_window(s_target)
+                                if win:
+                                    focus_window(win["hwnd"])
                             default_keyboard.type_text(text_to_type, interval=interval)
                             step_record["details"] = f"Typed '{text_to_type[:20]}...'" if len(text_to_type) > 20 else f"Typed '{text_to_type}'"
 
@@ -1639,6 +1644,11 @@ class MCPServer:
                             ok = default_virtual_desktop.paste_in_sandbox(target=step.get("target"), text=text_to_paste)
                             step_record["details"] = f"Sandbox pasted {len(text_to_paste)} characters (success={ok})"
                         else:
+                            s_target = step.get("target")
+                            if s_target:
+                                win = find_window(s_target)
+                                if win:
+                                    focus_window(win["hwnd"])
                             rst = bool(step.get("restore", False))
                             ok = default_clipboard.paste(text_to_paste, restore_clipboard=rst)
                             step_record["details"] = f"Pasted {len(text_to_paste)} characters (success={ok})"
@@ -1649,6 +1659,11 @@ class MCPServer:
                             ok = default_virtual_desktop.press_key_in_sandbox(target=step.get("target"), key=k)
                             step_record["details"] = f"Sandbox pressed '{k}' (success={ok})"
                         else:
+                            s_target = step.get("target")
+                            if s_target:
+                                win = find_window(s_target)
+                                if win:
+                                    focus_window(win["hwnd"])
                             default_keyboard.press_key(k)
                             step_record["details"] = f"Pressed '{k}'"
 
@@ -1658,6 +1673,11 @@ class MCPServer:
                             ok = default_virtual_desktop.hotkey_in_sandbox(target=step.get("target"), keys=keys)
                             step_record["details"] = f"Sandbox hotkey {keys} (success={ok})"
                         else:
+                            s_target = step.get("target")
+                            if s_target:
+                                win = find_window(s_target)
+                                if win:
+                                    focus_window(win["hwnd"])
                             default_keyboard.hotkey(*keys)
                             step_record["details"] = f"Hotkey {keys}"
 
@@ -1728,6 +1748,8 @@ class MCPServer:
                             res = default_window_manager.move_resize(w_target, b[0], b[1], b[2], b[3])
                         else:
                             raise ValueError(f"Unknown manage_window sub_action '{sub_act}'")
+                        if res.get("status") == "error":
+                            raise RuntimeError(res.get("message", f"Window {sub_act} failed."))
                         step_record["details"] = f"Window {sub_act}: {res.get('status')}"
 
                     elif act == "control_media":
